@@ -1,0 +1,5 @@
+Uncertainty Quantification with Polynomial Chaos Expansion (UQPCE) is an open source, Python based research code for use in parametric, non-deterministic computational studies.
+UQPCE utilizes a non-intrusive polynomial chaos for computational analyses.
+The software allows the user to perform an automated uncertainty analysis for any given computational code without requiring modification to the source. 
+UQPCE estimates sensitivities, confidence intervals, and other model statistics, which can be useful in the conceptual design and analysis of flight vehicles.
+This software was developed for the Aeronautics Systems Analysis Branch (ASAB) within the Systems Analysis and Concepts Directorate (SACD) at NASA Langley Research Center to study potential impacts of uncertainties on the prediction of ground noise generated from commercial supersonic aircraft concepts.

@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "uqpce"
+dynamic = ["version"]
+description = "Uncertainty Quantification with Polynomial Chaos Expansion"
+readme = "readme.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.9"
+keywords = ["uncertainty quantification", "polynomial chaos expansion", "uq", "nasa"]
+
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "Natural Language :: English",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "matplotlib>=3.4.2",
+    "mpi4py>=3.0.3",
+    "numpy>=1.20.3",
+    "PyYAML>=5.4.1",
+    "scipy>=1.6.3",
+    "sympy>=1.8"
+]
+
+[project.urls]
+Homepage = "https://github.com/nasa/UQPCE"
+
+[tool.hatch.version]
+path = "uqpce/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/uqpce",
+]
