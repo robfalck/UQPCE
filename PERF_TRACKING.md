@@ -63,17 +63,68 @@ baseline and modified, so it is a real property of the JAX path, not an artifact
 > The two speedup figures are **not yet trustworthy**. Seeding changes the optimizer's path, so
 > a baseline-vs-modified delta mixes the flag's effect with path variance. Round 2 isolates it.
 
-### Round 2 — isolating the flag (in progress)
+### Round 2 — isolating the flag
 
-Times a seeded run that *keeps* `force_alloc_complex` (same path, flag is the only difference)
-plus a repeat of the seeded runs to quantify run-to-run noise.
+Same seed, so `force_alloc_complex` is the only difference; plus a repeat of each seeded
+config to measure run-to-run noise.
 
-| Variant | Time |
-|---|---|
-| seeded + complex, numpy | pending |
-| seeded, no complex, numpy (rep 2) | pending |
-| seeded + complex, JAX | pending |
-| seeded, no complex, JAX (rep 2) | pending |
+| Config | numpy | JAX |
+|---|---|---|
+| seeded + complex | 35.83s | 228.80s |
+| seeded, no complex | 34.67s / 32.18s | 217.21s / 205.15s |
+| **apparent flag cost** | +2.4s vs 2.5s noise | +17.6s (~8%) vs 12.1s noise |
+
+The JAX effect is probably real; the numpy effect is inside the noise. Neither is nailed down —
+one sample per config, and see the determinism problem below.
+
+**Keep the change regardless:** it is free and provably result-neutral (bit-identical `lambd_50`).
+
+### Round 3 — determinism test (single-threaded BLAS)
+
+`OMP/MKL/OPENBLAS/NUMEXPR_NUM_THREADS=1`, `PYTHONHASHSEED=0`, `quantify.py` twice:
+
+| Run | S | AR | SFC_tech | DOC mean | Time |
+|---|---|---|---|---|---|
+| run 1 | 140.0237 | 15.4098 | 0.00247282 | 55702.4 | 36.57s |
+| run 2 | 139.8434 | 15.4350 | 0.00398580 | 55685.8 | 29.79s |
+
+Did **not** fix it. Also note the 6.8s spread (~20%) on identical single-threaded runs — timing
+noise here is large enough that no small delta above is trustworthy without repeats.
+
+---
+
+## OPEN PROBLEM: runs are still not reproducible
+
+**The seed did not deliver run-to-run repeatability.** Rerunning the *same* seeded script twice
+gives different optima:
+
+| `quantify.py`, identical seed | S | AR | DOC mean |
+|---|---|---|---|
+| run A | 140.1776 | 15.5437 | 55745.5 |
+| run B | 139.7506 | 15.4297 | 55685.4 |
+
+What we know:
+
+- `lambd_50` is **bit-identical across all numpy runs** within a threading config, so the seed
+  *did* fix the resampled basis and everything up through `run_model` is reproducible.
+- The divergence is therefore entirely inside `run_driver` (the SLSQP optimization).
+- Multithreaded-BLAS nondeterminism is **ruled out** — pinning to 1 thread did not fix it.
+  (It did shift `lambd_50` to `0.020696715222429895`, consistent with threading affecting FP
+  reduction order, but both single-threaded runs share that value and still diverge.)
+- `PYTHONHASHSEED=0` did not fix it either.
+
+Candidate causes not yet tested:
+
+- The Newton solve runs to ~688 iterations against `maxiter=700`. If some evaluations hit the
+  cap and others don't, tiny FP differences flip convergence and change the optimizer's path.
+  Raising `maxiter` / loosening `atol`+`rtol`, or fixing whatever makes convergence so slow,
+  may remove the knife-edge.
+- Something in the UQPCE CDF groups reseeds the global RNG mid-run
+  (`uqpce/mdao/cdfresidcomp.py:84`, `uqpce/mdao/cdfgroup.py:98` both call `np.random.seed(1)`).
+  Deterministic in isolation, but it means RNG state depends on call *order* and *count*.
+
+Suggested next step: record the objective at each driver iteration in two runs and diff them to
+find the first differing evaluation, rather than guessing.
 
 ---
 
@@ -84,9 +135,6 @@ plus a repeat of the seeded runs to quantify run-to-run noise.
   `force_alloc_complex` changed no results.
 - numpy and JAX agree to ~1e-12 on that value, so **JAX is running float64**; the 6.3× gap is
   not a precision-mode issue.
-- Seeding works: the seeded runs land on nearly the same optimum across backends
-  (S 140.18 vs 140.12, AR 15.54 vs 15.56, DOC mean 55745 vs 55734), where the unseeded
-  baselines scattered.
 
 ---
 
