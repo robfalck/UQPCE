@@ -91,8 +91,12 @@ class CoupledDisciplines(om.Group):
         self.nonlinear_solver.options['rtol'] = 1e-8
         # newton.options['err_on_non_converge'] = True
 
-        line_search = newton.linesearch = om.ArmijoGoldsteinLS(bound_enforcement='vector')
-        line_search.options['maxiter'] = 100
+        # ArmijoGoldstein backtracking was rejecting the full Newton step on nearly
+        # every iteration (residual halving at exactly 0.5), turning Newton into a
+        # linear contraction and driving solves to ~700 iterations. Plain bounds
+        # enforcement restores quadratic convergence; the bound handling itself is
+        # still required (without any linesearch the Jacobian goes singular/NaN).
+        line_search = newton.linesearch = om.BoundsEnforceLS(bound_enforcement='vector')
         line_search.options['print_bound_enforce'] = True
         self.linear_solver = om.DirectSolver()
 

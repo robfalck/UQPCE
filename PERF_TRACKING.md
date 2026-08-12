@@ -34,7 +34,50 @@ path, making timings non-comparable.
 
 Set before `interface.initialize()` / `UQPCEGroup` construction, where the draws happen.
 
-### 3. Plot suppression — harness-only so far, NOT a code change
+### 3. Replaced `ArmijoGoldsteinLS` with `BoundsEnforceLS` on the AeroStruct Newton solver
+
+**Biggest win so far — ~3x on numpy, ~5x on JAX.**
+
+The ArmijoGoldstein linesearch was already attached in both paths (it did not need adding). Its
+backtracking was rejecting the full Newton step on nearly every iteration, collapsing quadratic
+convergence into a linear contraction — the residual halved at *exactly* 0.5 per iteration, and
+near the optimum degraded to ~0.99, producing ~700-iteration solves.
+
+- `organize.py:94` (numpy path)
+- `quantify_JAX.py:102` (JAX path)
+
+Both keep `bound_enforcement='vector'` and `print_bound_enforce`. Bounds enforcement itself is
+load-bearing: with **no** linesearch at all the run dies with
+`RuntimeError: NaN entries found in 'AeroStruct'` (singular Jacobian).
+
+Convergence before vs. after, same first solve:
+
+```
+ArmijoGoldstein                     BoundsEnforceLS
+NL: Newton 0 ; 15662.4              NL: Newton 0 ; 15662.4
+NL: Newton 1 ; 296.47               NL: Newton 1 ; 5.3298
+NL: Newton 2 ; 5.586                NL: Newton 2 ; 1.7132
+NL: Newton 3 ; 0.10700              NL: Newton 3 ; 0.30554
+NL: Newton 4 ; 0.010365             NL: Newton 4 ; 0.0097384
+NL: Newton 5 ; 0.005074  <- 0.5x    NL: Newton 5 ; 1.5611e-05  Converged
+NL: Newton 6 ; 0.002532  <- 0.5x
+...continues halving to ~700
+```
+
+Linesearch comparison (`quantify.py`, one run each):
+
+| Linesearch | Time | Newton iters | Solves | Exit |
+|---|---|---|---|---|
+| ArmijoGoldstein (was) | 38.22s | 5860 | 96 | 0 |
+| **BoundsEnforceLS (now)** | **10.67s** | **846** | 99 | 0 |
+| none | 7.68s | 96 | 45 | 1 (NaN crash) |
+
+> Result note: `lambd_50` moved from `0.020696715222417356` to `0.020695741286746148`
+> (4.7e-5 relative). This is the new value being *more* converged, not less — the Armijo runs
+> were terminating on `rtol` at an absolute residual ~1.5e-4, while BoundsEnforceLS reaches
+> ~1.6e-5 in far fewer iterations. Worth a domain eye, since it is a real output change.
+
+### 4. Plot suppression — harness-only so far, NOT a code change
 
 `helpers.py` ends every `plot_*` with a blocking `plt.show()` and never calls `savefig`, so an
 interactive window stalls any timed run. The harness exports `MPLBACKEND=Agg`, making
@@ -91,6 +134,33 @@ one sample per config, and see the determinism problem below.
 Did **not** fix it. Also note the 6.8s spread (~20%) on identical single-threaded runs — timing
 noise here is large enough that no small delta above is trustworthy without repeats.
 
+### Round 4 — with `BoundsEnforceLS` (current state of both scripts)
+
+Two reps each, sequential, `MPLBACKEND=Agg`:
+
+| Variant | Run 1 | Run 2 | Newton iters |
+|---|---|---|---|
+| `quantify.py` (numpy) | 12.40s | 10.30s | 853 / 845 |
+| `quantify_JAX.py` | 42.43s | 37.47s | 852 / 851 |
+
+**Cumulative, vs. the original unmodified scripts:**
+
+| | original | now | speedup |
+|---|---|---|---|
+| numpy | 41.28s | ~11.4s | **3.6x** |
+| JAX | 228.37s | ~40.0s | **5.7x** |
+| **JAX/numpy gap** | **6.3x** | **3.5x** | — |
+
+Two things worth pulling out:
+
+- The linesearch fix dwarfs the `force_alloc_complex` change (which was within noise on numpy
+  and ~8% on JAX). Nearly all of the gain above is the linesearch.
+- Much of what looked like *JAX overhead* was JAX paying ~6x the price for the same wasted
+  Newton iterations. Removing the waste cut the backend gap from 6.3x to 3.5x. The remaining
+  3.5x is the real per-call JAX dispatch cost and is the next thing worth profiling.
+- Newton iteration counts now match closely across backends (853/845 vs 852/851), confirming
+  both paths are doing the same work.
+
 ---
 
 ## OPEN PROBLEM: runs are still not reproducible
@@ -126,6 +196,24 @@ Candidate causes not yet tested:
 Suggested next step: record the objective at each driver iteration in two runs and diff them to
 find the first differing evaluation, rather than guessing.
 
+### Update after round 4 (BoundsEnforceLS) — still unresolved
+
+The maxiter knife-edge candidate above is now **largely ruled out**: solves converge in ~5
+iterations instead of ~700, nowhere near `maxiter=700`, yet the four round-4 runs still land on
+different optima:
+
+| Round-4 run | S | DOC mean |
+|---|---|---|
+| numpy r1 | 139.5759 | 55680.9 |
+| numpy r2 | 139.9658 | 55730.6 |
+| JAX r1 | 140.0178 | 55696.4 |
+| JAX r2 | 140.0104 | 55716.1 |
+
+`lambd_50` remains bit-identical *within* each backend (numpy `0.020695741286746148`, JAX
+`0.020695741286744392`), so `run_model` is still fully reproducible and the divergence is still
+confined to `run_driver`. The RNG-reseeding candidate is now the leading suspect; the
+objective-per-iteration diff remains the right next step.
+
 ---
 
 ## Correctness checks
@@ -140,12 +228,22 @@ find the first differing evaluation, rather than guessing.
 
 ## Open leads on the JAX gap
 
-- **Newton iteration count.** `CoupledDisciplines` converged at iteration 688 against
+**Status after round 4:** the Newton-iteration lead below turned out to be the dominant cost and
+is now **fixed** (see change 3) — it cut the JAX/numpy gap from 6.3x to 3.5x. The remaining ~3.5x
+is genuine per-call JAX overhead and is now the top open lead.
+
+- **Newton iteration count.** *(RESOLVED — see change 3.)* `CoupledDisciplines` converged at
+  iteration 688 against
   `maxiter=700` — near the ceiling — and `iprint=2` prints every iteration. Both the iteration
   count and the console I/O hit both scripts equally, likely inflating absolute numbers and
   compressing the apparent JAX gap. Worth attacking next.
 - Not yet investigated: per-call JAX dispatch/tracing overhead on small vectors, and whether
-  the JAX components are re-tracing rather than reusing compiled code.
+  the JAX components are re-tracing rather than reusing compiled code. **Now the top lead** —
+  with iteration counts matched across backends (853/845 vs 852/851), the residual 3.5x is
+  per-call cost, not extra work.
+- **Balance residual scaling, still untouched.** The residual spans ~12 orders of magnitude
+  (starts ~15662, `atol=1e-8`) because it is an unnormalized range error in meters; `res_ref`
+  is commented out at `organize.py:77`. Independent of the linesearch, and still worth trying.
 
 ---
 
