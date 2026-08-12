@@ -36,8 +36,10 @@ class WeightsComp(om.ExplicitComponent):
         self.add_input('m_fuse', val=parameters['m_fuse'], units='kg')
 
         #outputs
-        self.add_output('m_empty', units='kg', shape=(n,))
-        self.add_output('m_wing', units='kg', shape=(n,))
+        # res_ref scales each residual to O(1) for the AeroStruct Newton solve;
+        # m_empty (~1.5e4 kg) was 87% of the initial residual norm on its own.
+        self.add_output('m_empty', units='kg', shape=(n,), res_ref=1.0e4)
+        self.add_output('m_wing', units='kg', shape=(n,), res_ref=1.0e3)
 
     def setup_partials(self):
         n = self.options['vec_size']

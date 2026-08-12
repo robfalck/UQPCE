@@ -41,8 +41,10 @@ class WeightsComp(om.JaxExplicitComponent):
         self.add_input("V_ref", val=parameters["V_ref"], units="m/s")
         self.add_input("m_fuse", val=parameters["m_fuse"], units="kg")
 
-        self.add_output("m_empty", shape=(n,), units="kg")
-        self.add_output("m_wing", shape=(n,), units="kg")
+        # res_ref mirrors disciplines/weight.py: scales residuals to O(1) for the
+        # AeroStruct Newton solve.
+        self.add_output("m_empty", shape=(n,), units="kg", res_ref=1.0e4)
+        self.add_output("m_wing", shape=(n,), units="kg", res_ref=1.0e3)
 
     def compute_primal(
         self,

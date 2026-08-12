@@ -74,7 +74,7 @@ class CoupledDisciplines(om.Group):
             normalize=True,
             ref0=1000.0,
             ref=20000.0,
-            # res_ref=1.0,
+            res_ref=1.0,
         )
         
         self.add_subsystem(

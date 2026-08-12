@@ -36,10 +36,13 @@ class AeroComp(om.ExplicitComponent):
         self.add_input('S_0', val=parameters['S_naught'], units="m**2" )
     
         #outputs
+        # res_ref scales each residual to O(1) for the AeroStruct Newton solve.
+        # Unscaled, WL (~5.6e3) and LD (~15) dominated the residual norm and forced
+        # Newton to chase ~12 orders of magnitude down to atol=1e-8.
         self.add_output('CL',units="unitless",shape=(n,))
         self.add_output('CD',units="unitless",shape=(n,))
-        self.add_output('LD',units="unitless",shape=(n,))
-        self.add_output('WL',units="N/m**2",shape=(n,))
+        self.add_output('LD',units="unitless",shape=(n,), res_ref=10.0)
+        self.add_output('WL',units="N/m**2",shape=(n,), res_ref=5.0e3)
 
     
     def setup_partials(self):

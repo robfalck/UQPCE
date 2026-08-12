@@ -36,10 +36,12 @@ class AeroCompJax(om.JaxExplicitComponent):
         self.add_input('S_0', val=parameters['S_naught'], units="m**2" )
     
         #outputs
+        # res_ref mirrors disciplines/aero.py: scales residuals to O(1) for the
+        # AeroStruct Newton solve.
         self.add_output('CL',units="unitless",shape=(n,))
         self.add_output('CD',units="unitless",shape=(n,))
-        self.add_output('LD',units="unitless",shape=(n,))
-        self.add_output('WL',units="N/m**2",shape=(n,))
+        self.add_output('LD',units="unitless",shape=(n,), res_ref=10.0)
+        self.add_output('WL',units="N/m**2",shape=(n,), res_ref=5.0e3)
 
     #jax assigns inputs to each of the follwing var names in args
     #in the order they appear in setup
