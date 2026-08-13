@@ -464,6 +464,37 @@ objective-per-iteration diff remains the right next step.
 
 ## Correctness checks
 
+### `check_partials` verification of the declared sparse partials (change 5) — PASSED
+
+`diag_checkpartials.py <backend> <n>`, method `fd`, run at `n=5` (the declared patterns are
+`arange`-based so the structure logic is identical at any n, and FD stays cheap). 92 subjacs
+checked per backend.
+
+The decisive result is that **the numpy control reproduces the same errors to 3+ digits**:
+
+| rel err | abs err | \|J_fd\|max | component / key |
+|---|---|---|---|
+| 6.00e-03 | 8.46e-06 | 1.41e-03 | `DOC_objective ('DOC','C_eng_ref')` |
+| 3.27e-03 | 5.88e+07 | 1.80e+10 | `AeroStruct.Range ('R','SFC')` |
+| 3.07e-03 | 1.83e-06 | 5.95e-04 | `AeroStruct.Weight ('m_wing','m_total')` |
+| 9.83e-04 | 1.93e-06 | 1.96e-03 | `DOC_objective ('DOC','R')` |
+
+Identical values appear for **both** backends, including the hand-written numpy components that
+predate this work. So these are finite-difference truncation error, not sparsity defects. A
+wrong `rows`/`cols` would silently drop Jacobian entries and show up as ~1.0 relative error;
+nothing of the sort appears. Worst case is 6e-3 on an entry where `|J| ~ 1e10`.
+
+> Benign warning seen during the check: *"Component 'DOC_objective' has zero derivatives for
+> ('DOC','beta_base'), ('DOC','delta_beta')"*. Not a missing dependency —
+> `DOC = ... + k_acq*C_eng_ref*(1 + beta_base*delta_beta*SFC_tech)`, so those derivatives carry a
+> factor of `SFC_tech`, which is 0 at the initialization point being checked. The dependency is
+> real away from that point.
+
+**Conclusion: the sparse partials added in change 5 are correct.** The performance work in
+changes 5-6 rests on a verified foundation.
+
+### Earlier checks
+
 - `lambd_50` is **bit-identical** baseline-vs-modified within each backend
   (numpy `0.020696715222417356`, JAX `0.020696715222464617`) — confirms removing
   `force_alloc_complex` changed no results.
@@ -507,9 +538,9 @@ is genuine per-call JAX overhead and is now the top open lead.
 - **UQPCE builds jax components regardless of backend.** `jax_explicit_comp.__init__` is called
   20x from `uqpce/mdao/cdf/cdfgroup.py:33`, so even the "numpy" script pays ~2.0s of jax
   compilation (73 compiles). Not fixable from the example scripts.
-- **Unverified:** the new sparse patterns were confirmed structurally (JAX nnz now matches numpy
-  exactly at 3,120) and by `lambd_50` agreement to 1e-11, but `check_partials` has **not** been
-  run against the JAX components. Worth doing before relying on these derivatives.
+- ~~**Unverified:** the new sparse patterns...~~ **(RESOLVED — verified, see below.)** The
+  patterns were confirmed structurally (JAX nnz matches numpy exactly at 3,120), by `lambd_50`
+  agreement to 1e-11, and now by `check_partials` against FD.
 - **Balance residual scaling.** *(DONE — see change 4, and note the diagnosis here was wrong:
   the balance residual was already O(1); the magnitude came from unscaled explicit outputs
   `m_empty`/`WL`/`m_wing`. Fixing it improved accuracy but gave no speedup.)* The residual
