@@ -32,7 +32,6 @@ class BreguetRangeComp(om.JaxExplicitComponent):
 
         self.add_output("R", shape=(n,), units="m")
 
-    def setup_partials(self):
         n = self.options['vec_size']
         arange = np.arange(n)
         # Vector inputs are elementwise across the sample dimension, so these

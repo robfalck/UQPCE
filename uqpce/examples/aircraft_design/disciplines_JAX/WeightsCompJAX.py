@@ -47,7 +47,6 @@ class WeightsComp(om.JaxExplicitComponent):
         self.add_output("m_empty", shape=(n,), units="kg", res_ref=1.0e4)
         self.add_output("m_wing", shape=(n,), units="kg", res_ref=1.0e3)
 
-    def setup_partials(self):
         n = self.options['vec_size']
         arange = np.arange(n)
         # Vector inputs are elementwise across the sample dimension, so these

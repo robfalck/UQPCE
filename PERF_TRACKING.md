@@ -254,7 +254,32 @@ bought nothing measurable. Reverting it would cost nothing either.
 
 **The ~700 bound clips per run remain unexplained and open.**
 
-### 10. Plot suppression — harness-only so far, NOT a code change
+### 10. Worked around an OpenMDAO deficiency: declarations moved to `setup()`
+
+**This is an OpenMDAO bug, not a modeling choice, and will be addressed upstream.** The change
+here is a temporary workaround that should be reverted once OpenMDAO is fixed.
+
+`JaxExplicitComponent._setup_partials` (`jax_explicit_comp.py:190`) checks
+`if not self._declared_partials_patterns:` **before** calling `super()._setup_partials()` —
+which is the call that actually invokes the user's `setup_partials()`. So partials declared in
+`setup_partials()`, the documented and idiomatic place to declare them, are invisible to that
+check. OpenMDAO then concludes the user declared nothing, sets `_do_sparsity = True`, and
+auto-declares partials from inferred deps. The user's declarations are applied afterward and do
+win (nnz stayed 3,120), but the component has already been signed up for a sparsity computation
+it never needed.
+
+Workaround applied to all 8 `disciplines_JAX/*.py`: declare partials at the end of `setup()`
+instead, so `_declared_partials_patterns` is populated before the check runs.
+
+Effect: `compute_sparsity` **34 calls / 2.08s -> 20 calls / 1.12s** (the remaining 20 are
+UQPCE's own jax components, which genuinely declare nothing), compiles 126 -> 107.
+
+Proper fix upstream: perform the `_declared_partials_patterns` check *after*
+`super()._setup_partials()` has run the user's `setup_partials()`, so declarations made in the
+idiomatic location are seen. Until then, any `JaxExplicitComponent` that declares partials in
+`setup_partials()` silently pays for sparsity detection it does not need.
+
+### 11. Plot suppression — harness-only so far, NOT a code change
 
 `helpers.py` ends every `plot_*` with a blocking `plt.show()` and never calls `savefig`, so an
 interactive window stalls any timed run. The harness exports `MPLBACKEND=Agg`, making
@@ -406,6 +431,125 @@ Two reps each, sequential, `MPLBACKEND=Agg`:
 
 Note the JAX result depends on the OpenMDAO working-tree patch (change 6). On a stock OpenMDAO
 install the JAX script is ~25s and the gap is ~2.4x.
+
+### Round 8 — current state, three reps each, interleaved
+
+No compilation caching (see "Rejected" below). `MPLBACKEND=Agg`, sequential:
+
+| Variant | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| `quantify.py` (numpy) | 9.06s | 8.84s | 8.93s |
+| `quantify_JAX.py` | 13.17s | 12.68s | 13.18s |
+
+**Backend gap: 1.46x** (was 6.3x at session start). This comparison is trustworthy — same
+session, back-to-back, alternating backends.
+
+> **Caveat on the cumulative "vs. original" speedups quoted in earlier rounds.** Those compare
+> against baselines measured at the start of the session, and the machine has since drifted
+> (identical code measured ~15.0s/~10.3s in one round and ~13.0s/~8.9s in the next). An attempt
+> to re-measure the baselines in-session **failed**: `baseline_quantify.py` is only a snapshot of
+> `quantify.py` at HEAD and still imports the *modified* `organize.py` and `disciplines/`, so it
+> ran in 9.53s rather than 41.28s — it inherits all our solver fixes and is not a baseline at
+> all. `baseline_quantify_JAX.py` is contaminated the other way: it defines its group inline (so
+> it kept the original ArmijoGoldstein, hence 218s) but imports our modified `disciplines_JAX/`.
+> **A valid cumulative number requires a pristine checkout (git worktree/stash), not these
+> files.** Treat the round-1..7 cumulative figures as indicative only; the backend *gap* within
+> each round is the reliable quantity.
+
+## Rejected / dead ends
+
+### Persistent XLA compilation cache — REJECTED as disingenuous
+
+Tested and it worked (numpy ~10.3s -> 7.6s, JAX ~15.0s -> ~10.8s warm) but was **backed out at
+the user's direction**: caching XLA compilations between runs hides real per-process work rather
+than removing it, and the "warm" figure only holds until any component changes, which would
+quietly contaminate future comparisons.
+
+Kept as a *measured characteristic* instead: **~3.0s of the JAX run and ~1.5s of the numpy run
+is XLA compilation** (~107 and ~73 compiles). At current runtimes that is ~23% and ~17%. It is
+fixed per-process startup cost, so it matters less as the problem grows.
+
+### Matrix-free partials — ASSESSED, NOT A FIT
+
+Requested assessment. **Verdict: wrong tool for this problem.** Measured: 81.59s (vs ~13s), 1448
+Newton iterations, then `RuntimeError: NaN entries found in 'UQPCE.CL_upper_cdf_group'`.
+
+Structural reasons it cannot win here:
+
+- The assembled Jacobian is 1404x1404 with **3,120 nonzeros — 0.158% dense**.
+- `gstrf` costs **0.234s across 1,007 factorizations** (~0.23ms each), statistically identical to
+  numpy's 0.214s. There is nothing left to save on the linear solve.
+- It trades a nearly-free sparse direct solve for iterative Krylov requiring many jacvec products
+  per linear system, each a JAX `jvp`.
+- It forfeits `DirectSolver`. This Newton system is delicate — removing the linesearch entirely
+  produced a singular Jacobian (change 3) — so it is exactly the wrong system to hand to Krylov.
+
+Matrix-free earns its keep when the Jacobian is large, dense, or memory-bound. This one is tiny
+and 99.8% zeros.
+
+### asdex — PROMISING, fixes the broken coloring path (assessed, not integrated)
+
+[asdex](https://github.com/adrhill/asdex) (MIT, PyPI 0.5.2) does automatic sparse
+differentiation for JAX: it detects sparsity by **abstract interpretation of the Jaxpr** — reading
+structure off the computation graph for a globally-valid pattern — then colors it. That is
+precisely the capability OpenMDAO's perturbation-based detector lacks.
+
+On `AeroCompJax` (n=156), where OpenMDAO reported *"Improvement of 0.0%"*:
+
+```
+ColoredPattern(624x633, nnz=5304, sparsity=98.7%, JVP, 13 colors)
+  13 JVPs (instead of 624 VJPs or 633 JVPs)
+```
+
+**The color count is structural and stays at 13 for every n**, while `jacfwd` cost scales with
+column count:
+
+| n | columns | colors | jacfwd | asdex | speedup | break-even |
+|---|---|---|---|---|---|---|
+| 156 | 633 | 13 | 0.426ms | 0.140ms | 3.0x | 668 calls |
+| 500 | 2009 | 13 | 3.540ms | 0.140ms | 25.4x | 19 calls |
+| 1000 | 4009 | 13 | 11.53ms | 0.156ms | 73.9x | 16 calls |
+| 2000 | 8009 | 13 | 50.43ms | 0.315ms | 159.9x | 11 calls |
+
+**Assessment:** a genuine architectural fit, but **modest at this example's size**. At n=156 the
+191ms one-time detection needs ~668 calls to repay, and we make ~450 partial calls per
+component — roughly break-even. The case becomes overwhelming at n>=500.
+
+**Integration notes (the real work is output mapping, not the call):**
+
+- `asdex.jacobian_coloring(f, *args, argnums=...)` takes an `argnums` sequence, a near drop-in
+  for the existing `fjax(differentiable_cp, argnums=wrt_idxs)` at `jax_explicit_comp.py:349`.
+- But asdex returns **one combined sparse matrix** (BCOO / scipy COO-CSR-CSC) for the whole
+  component, while `_jax_derivs2partials` expects a nested per-`(of, wrt)` tuple. A translation
+  layer from combined-sparse to OpenMDAO subjacs is required.
+- `ColoredPattern.save()/load()` exists, so colorings can persist like OpenMDAO's existing static
+  coloring files — legitimate, since coloring is a structural property computed once at setup.
+- Suggested framing upstream: asdex as an **optional backend for `declare_coloring()`** on
+  `JaxExplicitComponent`, since the built-in path is currently broken two different ways
+  (see below).
+
+> **Dependency cost — this is the real decision.** asdex hard-requires `jax>=0.11.0`. Installing
+> it upgraded this environment from jax 0.10.2 to 0.11.0 (plus jaxlib). Verified safe here:
+> `lambd_50` is **bit-identical** across the upgrade on both backends
+> (`0.020696712556220825` JAX / `0.020696712556270848` numpy), and timings are comparable
+> (JAX 14.43/13.50s vs 13.17-13.18s; numpy 9.16/9.00s vs 8.84-9.06s). But note **every timing in
+> rounds 1-8 was measured on jax 0.10.2** and is not strictly comparable to later numbers.
+
+### `declare_coloring()` — BROKEN in this OpenMDAO version
+
+Two failure modes, both dead ends:
+
+1. Without declared sparsity: runs, but reports *"Coloring was deactivated. Improvement of 0.0%"*
+   on every component — it cannot find the diagonal structure of elementwise `compute_primal`
+   functions.
+2. With declared sparsity: **crashes** —
+   `ValueError: non-broadcastable output operand with shape (1,) doesn't match the broadcast
+   shape (1,1)` at `csc_matrix.py:122` in `_update_from_submat`.
+
+Worth an upstream report alongside the `jax_utils` fix (change 6) and the `_setup_partials`
+ordering deficiency (change 10). Consequence: the remaining `_compute_partials` cost is
+**structural** — without a working coloring path, OpenMDAO computes the full dense Jacobian via
+`jacfwd` and the declared sparsity only filters it afterward.
 
 ---
 

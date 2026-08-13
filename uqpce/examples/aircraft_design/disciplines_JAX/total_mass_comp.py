@@ -32,7 +32,6 @@ class TotalMassComp(om.JaxExplicitComponent):
         #outputs
         self.add_output('m_total', units='kg', shape=(n,))
 
-    def setup_partials(self):
         n = self.options['vec_size']
         arange = np.arange(n)
         # Vector inputs are elementwise across the sample dimension, so these
