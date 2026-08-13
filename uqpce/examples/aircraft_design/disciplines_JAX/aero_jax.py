@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 import openmdao.api as om
 
 from fixed import parameters
@@ -46,6 +47,18 @@ class AeroCompJax(om.JaxExplicitComponent):
     #jax assigns inputs to each of the follwing var names in args
     #in the order they appear in setup
     #as a result its best to just keep the names the same I guess
+    def setup_partials(self):
+        n = self.options['vec_size']
+        arange = np.arange(n)
+        # Vector inputs are elementwise across the sample dimension, so these
+        # subjacs are diagonal. Without this OpenMDAO assumes dense (n x n).
+        vec_wrt = ['m_total', 'delta_CD0', 'delta_ks', 'delta_e']
+        scalar_wrt = ['S', 'V_cruise', 'AR', 'ks_base', 'e_base',
+                      'C_D0_base', 'g', 'rho', 'S_0']
+        for of in ('CL', 'CD', 'LD', 'WL'):
+            self.declare_partials(of=of, wrt=vec_wrt, rows=arange, cols=arange)
+            self.declare_partials(of=of, wrt=scalar_wrt)
+
     def compute_primal(self,
                        S, V_cruise, AR,
                        m_total,

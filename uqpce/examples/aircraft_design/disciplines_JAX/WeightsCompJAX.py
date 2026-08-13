@@ -1,5 +1,6 @@
 import openmdao.api as om
 import jax.numpy as jnp
+import numpy as np
 
 from fixed import parameters, tuning
 
@@ -45,6 +46,17 @@ class WeightsComp(om.JaxExplicitComponent):
         # AeroStruct Newton solve.
         self.add_output("m_empty", shape=(n,), units="kg", res_ref=1.0e4)
         self.add_output("m_wing", shape=(n,), units="kg", res_ref=1.0e3)
+
+    def setup_partials(self):
+        n = self.options['vec_size']
+        arange = np.arange(n)
+        # Vector inputs are elementwise across the sample dimension, so these
+        # subjacs are diagonal. Without this OpenMDAO assumes dense (n x n),
+        # which made the AeroStruct sparse LU ~82x more expensive.
+        self.declare_partials(of='m_empty', wrt=['m_total', 'm_engine', 'delta_kw', 'delta_fsys', 'delta_p'], rows=arange, cols=arange)
+        self.declare_partials(of='m_empty', wrt=['S', 'AR', 'V_cruise', 'kw_base', 'fsys_base', 'p_base', 'V_ref', 'm_fuse'])
+        self.declare_partials(of='m_wing', wrt=['m_total', 'm_engine', 'delta_kw', 'delta_fsys', 'delta_p'], rows=arange, cols=arange)
+        self.declare_partials(of='m_wing', wrt=['S', 'AR', 'V_cruise', 'kw_base', 'fsys_base', 'p_base', 'V_ref', 'm_fuse'])
 
     def compute_primal(
         self,

@@ -122,7 +122,55 @@ NL: Newton 2 ; 0.40094     NL: Newton 6 ; 9.7144e-12  Converged
 NL: Newton 3 ; 0.058662
 ```
 
-### 5. Plot suppression — harness-only so far, NOT a code change
+### 5. Declared sparse partials on all JAX components
+
+**Biggest JAX-side win — 39-41s -> ~25s, and it was a missing-declaration bug, not JAX overhead.**
+
+Profiling (cProfile, `quantify_JAX.py` vs `quantify.py`) showed the hotspot was not JAX at all:
+
+| | JAX run | numpy run |
+|---|---|---|
+| `_superlu.gstrf` (sparse LU) | **20.49s** / 1035 calls | **0.25s** / 1043 calls |
+| `backend_compile_and_load` | 4.11s / 126 | 1.98s / 73 |
+| `csr_matrix._update_from_submat` | 1.51s / 46632 | 0.22s / 46544 |
+| total (profiled, inflated) | 46.4s | 15.0s |
+
+Sparse LU was 44% of the JAX run at ~82x the per-call cost with an identical call count — the
+signature of a much denser matrix. Confirmed by measuring the assembled AeroStruct Jacobian:
+
+| backend | dr_do nnz | density |
+|---|---|---|
+| numpy (before) | 3,120 | 0.158% |
+| JAX (before) | **269,100** | **13.65%** |
+| JAX (after fix) | **3,120** | **0.158%** |
+
+**Cause:** all eight `disciplines_JAX/*.py` components declared no partials, so OpenMDAO built
+dense 156x156 subjacobians (n=156 samples) where the true structure is diagonal. The numpy
+components have always declared sparse diagonals (`disciplines/weight.py:56-62`; 35 such calls
+in `disciplines/aero.py`).
+
+**Fix:** added `setup_partials` to all eight JAX components declaring
+`rows=arange, cols=arange` for vector inputs and dense for scalar inputs, mirroring the numpy
+side exactly.
+
+> **On the re-jitting hypothesis:** ruled out. `JAX_LOG_COMPILES=1` shows 126 compiles, each
+> cached after first use, 4.1s total — one-time, not per-iteration. (Side note: the *numpy* run
+> also does 73 JAX compiles for ~2.0s, so something in the UQPCE stack pulls in JAX regardless.)
+> The compiles are of individual primitives (`jit(log)`, `jit(multiply)` on `float64[1]`), i.e.
+> op-by-op dispatch rather than one fused kernel per component — worth a separate look, but it
+> was not the dominant cost.
+
+> **`declare_coloring()` was tried first and did not work.** It ran on every component but
+> reported *"Coloring was deactivated. Improvement of 0.0% was less than min allowed (5.0%)"* —
+> automatic sparsity detection failed to find the diagonal structure of elementwise
+> `compute_primal` functions. It was removed in favor of explicit declarations since it added
+> startup cost for zero benefit. Possibly worth an upstream OpenMDAO report.
+
+> **Fairness caveat:** this means the two backends were never solving structurally equivalent
+> linear systems. A large share of the original "JAX is far slower" gap was this missing
+> declaration, not JAX. Only the post-fix numbers are a fair backend comparison.
+
+### 6. Plot suppression — harness-only so far, NOT a code change
 
 `helpers.py` ends every `plot_*` with a blocking `plt.show()` and never calls `savefig`, so an
 interactive window stalls any timed run. The harness exports `MPLBACKEND=Agg`, making
@@ -232,6 +280,29 @@ Worth keeping for that reason, not for throughput.
 | JAX | 228.37s | ~40.1s | **5.7x** |
 | **JAX/numpy gap** | **6.3x** | **3.6x** | — |
 
+### Round 6 — with sparse JAX partials (current state of both scripts)
+
+Two reps each, sequential, `MPLBACKEND=Agg`:
+
+| Variant | Run 1 | Run 2 | Newton iters | vs. round 5 |
+|---|---|---|---|---|
+| `quantify.py` (numpy) | 10.36s | 12.10s | 858 / 860 | unchanged (control) |
+| `quantify_JAX.py` | **25.07s** | **24.92s** | 863 / 854 | **39-41s -> ~25s (1.6x)** |
+
+An intermediate attempt with `declare_coloring()` measured 44.22s / 40.96s — i.e. no better than
+round 5, consistent with the coloring self-deactivating.
+
+Cross-backend agreement holds: `lambd_50` = `0.020696712556186183` (JAX) vs
+`0.020696712556301372` (numpy), agreeing to ~1e-11.
+
+**Cumulative, vs. the original unmodified scripts:**
+
+| | original | now | speedup |
+|---|---|---|---|
+| numpy | 41.28s | ~11.2s | **3.7x** |
+| JAX | 228.37s | ~25.0s | **9.1x** |
+| **JAX/numpy gap** | **6.3x** | **2.2x** | — |
+
 ---
 
 ## OPEN PROBLEM: runs are still not reproducible
@@ -312,6 +383,13 @@ is genuine per-call JAX overhead and is now the top open lead.
   the JAX components are re-tracing rather than reusing compiled code. **Now the top lead** —
   with iteration counts matched across backends (853/845 vs 852/851), the residual 3.5x is
   per-call cost, not extra work.
+  - *(PARTLY RESOLVED — see change 5. Re-tracing was ruled out: 126 cached compiles, one-time.
+    The gap was dense Jacobians, now fixed; 3.5x -> 2.2x. What remains as the live lead is the
+    op-by-op primitive dispatch seen in the compile log — the components are not executing as
+    one fused kernel each.)*
+- **Unverified:** the new sparse patterns were confirmed structurally (JAX nnz now matches numpy
+  exactly at 3,120) and by `lambd_50` agreement to 1e-11, but `check_partials` has **not** been
+  run against the JAX components. Worth doing before relying on these derivatives.
 - **Balance residual scaling.** *(DONE — see change 4, and note the diagnosis here was wrong:
   the balance residual was already O(1); the magnitude came from unscaled explicit outputs
   `m_empty`/`WL`/`m_wing`. Fixing it improved accuracy but gave no speedup.)* The residual

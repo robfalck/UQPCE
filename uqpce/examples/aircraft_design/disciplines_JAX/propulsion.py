@@ -1,5 +1,6 @@
 import openmdao.api as om
 import jax.numpy as jnp
+import numpy as np
 from fixed import parameters
 
 class PropulsionComp(om.JaxExplicitComponent):
@@ -34,6 +35,15 @@ class PropulsionComp(om.JaxExplicitComponent):
 
         #outputs
         self.add_output('SFC', units="1/s", shape=(n,))
+
+    def setup_partials(self):
+        n = self.options['vec_size']
+        arange = np.arange(n)
+        # Vector inputs are elementwise across the sample dimension, so these
+        # subjacs are diagonal. Without this OpenMDAO assumes dense (n x n),
+        # which made the AeroStruct sparse LU ~82x more expensive.
+        self.declare_partials(of='SFC', wrt=['delta_eta', 'delta_kv'], rows=arange, cols=arange)
+        self.declare_partials(of='SFC', wrt=['SFC_tech', 'V_cruise', 'eta_base', 'kv_base', 'SFC_ref', 'V_ref'])
 
     def compute_primal(self, SFC_tech, V_cruise, delta_eta, delta_kv, eta_base, kv_base, SFC_ref, V_ref):
         """

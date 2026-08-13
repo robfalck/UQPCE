@@ -1,5 +1,6 @@
 import openmdao.api as om
 import jax.numpy as jnp
+import numpy as np
 from fixed import parameters
 
 class DOC(om.JaxExplicitComponent):
@@ -36,6 +37,15 @@ class DOC(om.JaxExplicitComponent):
         #outputs
         self.add_output('DOC', units='USD', shape=(n,))
        
+    def setup_partials(self):
+        n = self.options['vec_size']
+        arange = np.arange(n)
+        # Vector inputs are elementwise across the sample dimension, so these
+        # subjacs are diagonal. Without this OpenMDAO assumes dense (n x n),
+        # which made the AeroStruct sparse LU ~82x more expensive.
+        self.declare_partials(of='DOC', wrt=['R', 'm_fuel', 'delta_Cf', 'delta_beta'], rows=arange, cols=arange)
+        self.declare_partials(of='DOC', wrt=['SFC_tech', 'V_cruise', 'Cf_base', 'beta_base', 'C_time', 'k_acq', 'C_eng_ref'])
+
     def compute_primal(self, SFC_tech, V_cruise, R, m_fuel, delta_Cf, delta_beta, Cf_base, beta_base, C_time, k_acq, C_eng_ref):
         """
         DOC = Cf_base * delta_Cf * m_fuel + C_time * (R / V_cruise) + k_acq * C_eng_ref * (1 + beta_base * delta_beta * SFC_tech)
