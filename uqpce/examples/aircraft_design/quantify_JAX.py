@@ -81,7 +81,7 @@ class CoupledDisciplines(om.Group):
             eq_units='m',
             normalize=True,
             ref0=1000.0,
-            ref=20000.0,
+            ref=32000.0,
             res_ref=1.0,
         )
         

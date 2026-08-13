@@ -208,7 +208,53 @@ Log volume dropped from ~39,300 lines to ~1,440 (96%), because the option printe
 > i.e. no change on either side. cProfile exaggerates formatting cost and redirected stdout is
 > cheap. Kept for readability only; **do not count it as a performance win.**
 
-### 8. Plot suppression — harness-only so far, NOT a code change
+### 8. `m_fuel` bound experiment — TRIED AND REVERTED
+
+Setting the balance `upper` from 100000.0 to 50000.0 was a **regression on both axes** and was
+reverted:
+
+| | upper=100000 | upper=50000 |
+|---|---|---|
+| Newton iters | ~860 | **~3,640** (4.2x) |
+| bound clips | 697 | **3,500** (5x) |
+| numpy | ~10.4s | 13.3 / 13.4s |
+| JAX | ~16.8s | 25.2 / 25.4s |
+
+Worse, **the cap was binding on a real solution**: one of the 156 samples converged at exactly
+50000.0, i.e. a physically valid state was being clamped. It showed in the output —
+`lambd_50` moved to `0.0206992464` from `0.0206967126` (~1e-6 relative).
+
+> **Correction to an earlier note in this file:** converged `m_fuel` is *not* ~16,000 kg. That
+> figure was the deterministic single-point case. Across the 156 uncertainty samples it is
+> min 15,634 / **mean 32,021** / max >50,000. So the original 100000.0 bound is ~2x headroom,
+> not ~6x, and 50000.0 has effectively none.
+
+### 9. Balance `ref` retune 20000 -> 32000 — NEUTRAL, kept on principle
+
+`organize.py:76`, `quantify_JAX.py:84`. Hypothesis: `ref=20000` put the true state (~32,000 kg
+mean) at 1.6 in scaled space, so Newton's scaled steps overshoot into the upper bound.
+Matching `ref` to the actual magnitude should size the steps proportionately.
+
+**The hypothesis did not hold.** Measured against `ref=20000`:
+
+| | ref=20000 | ref=32000 |
+|---|---|---|
+| bound clips | 697 | 700 |
+| Newton iters | ~860 | ~857 |
+| numpy | ~10.4s | 10.31 / 9.75s |
+| JAX | ~16.8s | 15.48 / 15.05s |
+
+Clips and iterations are unchanged, so `ref` is **not** the mechanism behind the clipping. The
+JAX times look slightly better but the spread overlaps the previous round — treat as noise, not
+a win. `lambd_50` = `0.020696712556270848` vs `0.020696712556301372` before, agreeing to 1e-12,
+confirming this is pure scaling with nothing clamped.
+
+Kept because matching `ref` to the actual state magnitude is the more defensible setting, but it
+bought nothing measurable. Reverting it would cost nothing either.
+
+**The ~700 bound clips per run remain unexplained and open.**
+
+### 10. Plot suppression — harness-only so far, NOT a code change
 
 `helpers.py` ends every `plot_*` with a blocking `plt.show()` and never calls `savefig`, so an
 interactive window stalls any timed run. The harness exports `MPLBACKEND=Agg`, making
@@ -445,10 +491,15 @@ is genuine per-call JAX overhead and is now the top open lead.
     The gap was dense Jacobians, now fixed; 3.5x -> 2.2x. What remains as the live lead is the
     op-by-op primitive dispatch seen in the compile log — the components are not executing as
     one fused kernel each.)*
-- **`m_fuel` is hitting its bound ~697 times per run.** The balance declares `upper=100000.0` kg
+- **`m_fuel` is hitting its bound ~697 times per run.** *(STILL OPEN. Two fixes tried and
+  neither worked — see changes 8 and 9. Tightening the bound to 50000 was a 4.2x iteration
+  regression that clamped a valid sample; retuning `ref` to 32000 left the clip count flat at
+  700. The mechanism is still unidentified.)* The balance declares `upper=100000.0` kg
   while converged fuel mass is ~16,000 kg, so Newton overshoots ~6x on intermediate steps and
   gets clipped, repeatedly. Real wasted solver work and a sign the balance bounds / `ref` are
   loose. Now easy to miss, since change 7 silenced the warnings that revealed it.
+  *(The ~16,000 kg figure in the line above is wrong — it is the deterministic case. The
+  156-sample mean is 32,021 kg. Corrected in change 8.)*
 - **JAX still executes op-by-op, not as fused kernels.** `dispatch.apply_primitive` is 184,539
   calls / 3.13s, and the compile log shows individual primitives (`jit(log)`, `jit(multiply)` on
   `float64[1]`) rather than one compiled function per component. Likely the largest remaining
