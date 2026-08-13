@@ -170,7 +170,45 @@ side exactly.
 > linear systems. A large share of the original "JAX is far slower" gap was this missing
 > declaration, not JAX. Only the post-fix numbers are a fair backend comparison.
 
-### 6. Plot suppression — harness-only so far, NOT a code change
+### 6. OpenMDAO fix: numpy-ify jax derivs before sparse indexing (1.5x on JAX)
+
+**This change is in the OpenMDAO checkout, not in this repo.**
+`C:/Users/robfa/Codes/OpenMDAO.git`, `openmdao/utils/jax_utils.py:1093`, uncommitted:
+
+```python
+# before -- fancy-indexes a JAX array, routing every gather through jax dispatch
+partials[ofname, wrtname] = dvals[rows, sjmeta['cols']]
+# after
+partials[ofname, wrtname] = np.asarray(dvals)[rows, sjmeta['cols']]
+```
+
+Re-profiling after change 5 showed `_jax_derivs2partials` at **20.6s cumulative of a 40.3s
+profiled run (51%)**, with `_index_to_gather` alone at 13.0s over 20,473 calls. The branch only
+runs when a component declares sparse partials (`rows is not None`) — i.e. change 5 is what
+activated it. The two fixes compound: sparsity makes the LU cheap, this makes the extraction
+cheap.
+
+Measured via runtime monkeypatch before patching: 25.26s -> 17.56s / 16.57s, with `lambd_50`
+**bit-identical** (`0.020696712556186183`). Purely a performance change.
+
+> Worth reporting upstream — it affects any jax component with declared sparsity, not just this
+> example. `expt_fastpartials.py` in the example dir holds the standalone monkeypatch
+> reproduction.
+
+### 7. Disabled `print_bound_enforce` — log hygiene, NOT a speedup
+
+`organize.py`, `quantify_JAX.py`: `print_bound_enforce` True -> False.
+
+Log volume dropped from ~39,300 lines to ~1,440 (96%), because the option printed a full
+156-element array ~700 times per run.
+
+> **Correction:** this was initially predicted to be worth ~1s (~7%) based on cProfile showing
+> `arrayprint.recurser` at 0.99s cumulative and 437,786 `dragon4_positional` calls. Measurement
+> did not support that — numpy 10.36/12.10s -> 11.01/10.60s, JAX 25.07/24.92s -> 26.11/24.65s,
+> i.e. no change on either side. cProfile exaggerates formatting cost and redirected stdout is
+> cheap. Kept for readability only; **do not count it as a performance win.**
+
+### 8. Plot suppression — harness-only so far, NOT a code change
 
 `helpers.py` ends every `plot_*` with a blocking `plt.show()` and never calls `savefig`, so an
 interactive window stalls any timed run. The harness exports `MPLBACKEND=Agg`, making
@@ -303,6 +341,26 @@ Cross-backend agreement holds: `lambd_50` = `0.020696712556186183` (JAX) vs
 | JAX | 228.37s | ~25.0s | **9.1x** |
 | **JAX/numpy gap** | **6.3x** | **2.2x** | — |
 
+### Round 7 — with the OpenMDAO jax_utils patch (current state)
+
+Two reps each, sequential, `MPLBACKEND=Agg`:
+
+| Variant | Run 1 | Run 2 | vs. round 6 |
+|---|---|---|---|
+| `quantify.py` (numpy) | 11.22s | 9.64s | unchanged (control) |
+| `quantify_JAX.py` | **17.63s** | **15.89s** | **~25s -> ~16.8s (1.5x)** |
+
+**Cumulative, vs. the original unmodified scripts:**
+
+| | original | now | speedup |
+|---|---|---|---|
+| numpy | 41.28s | ~10.4s | **4.0x** |
+| JAX | 228.37s | ~16.8s | **13.6x** |
+| **JAX/numpy gap** | **6.3x** | **1.6x** | — |
+
+Note the JAX result depends on the OpenMDAO working-tree patch (change 6). On a stock OpenMDAO
+install the JAX script is ~25s and the gap is ~2.4x.
+
 ---
 
 ## OPEN PROBLEM: runs are still not reproducible
@@ -387,6 +445,17 @@ is genuine per-call JAX overhead and is now the top open lead.
     The gap was dense Jacobians, now fixed; 3.5x -> 2.2x. What remains as the live lead is the
     op-by-op primitive dispatch seen in the compile log — the components are not executing as
     one fused kernel each.)*
+- **`m_fuel` is hitting its bound ~697 times per run.** The balance declares `upper=100000.0` kg
+  while converged fuel mass is ~16,000 kg, so Newton overshoots ~6x on intermediate steps and
+  gets clipped, repeatedly. Real wasted solver work and a sign the balance bounds / `ref` are
+  loose. Now easy to miss, since change 7 silenced the warnings that revealed it.
+- **JAX still executes op-by-op, not as fused kernels.** `dispatch.apply_primitive` is 184,539
+  calls / 3.13s, and the compile log shows individual primitives (`jit(log)`, `jit(multiply)` on
+  `float64[1]`) rather than one compiled function per component. Likely the largest remaining
+  structural difference between the backends.
+- **UQPCE builds jax components regardless of backend.** `jax_explicit_comp.__init__` is called
+  20x from `uqpce/mdao/cdf/cdfgroup.py:33`, so even the "numpy" script pays ~2.0s of jax
+  compilation (73 compiles). Not fixable from the example scripts.
 - **Unverified:** the new sparse patterns were confirmed structurally (JAX nnz now matches numpy
   exactly at 3,120) and by `lambd_50` agreement to 1e-11, but `check_partials` has **not** been
   run against the JAX components. Worth doing before relying on these derivatives.

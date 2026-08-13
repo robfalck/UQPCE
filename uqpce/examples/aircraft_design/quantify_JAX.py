@@ -104,7 +104,9 @@ class CoupledDisciplines(om.Group):
         # enforcement alone restores quadratic convergence and is still needed to keep
         # the Jacobian non-singular.
         line_search = newton.linesearch = om.BoundsEnforceLS(bound_enforcement='vector')
-        line_search.options['print_bound_enforce'] = True
+        # print_bound_enforce=True printed a full 156-element array ~700 times
+        # per run (~1s of pure formatting). Flip to True when debugging bounds.
+        line_search.options['print_bound_enforce'] = False
         self.linear_solver = om.DirectSolver()
 
 class CL_constraint(om.ExplicitComponent):
